@@ -2,6 +2,9 @@ import ExcelJS from "exceljs";
 import fs from "fs";
 import path from "path";
 
+const app = express();
+app.use(express.json());
+
 app.post("/export/test", async (req, res) => {
   try {
     const filters = req.body;
