@@ -8,5 +8,6 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.39.3",
     "express": "^4.19.2"
+    "exceljs": "^4.4.0"
   }
 }
