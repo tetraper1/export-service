@@ -1,12 +1,33 @@
 import express from "express";
 import { createClient } from "@supabase/supabase-js";
 import ExcelJS from "exceljs";
-import fs from "fs";
 import path from "path";
 
 const app = express();
 app.use(express.json());
 
+// 🔐 Supabase client (OBLIGATORIO)
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+
+// 📌 Columnas del XLSX (OBLIGATORIO)
+const COLUMNS = [
+  { header: "ID", key: "id" },
+  { header: "Número Guía", key: "numero_guia" },
+  { header: "Código Rastreo", key: "codigo_rastreo" },
+  { header: "Guía Madre", key: "guia_madre" },
+  { header: "Ruta Entrega", key: "nombre_ruta_entrega" },
+  { header: "Calle Destino", key: "calle_destino" },
+  { header: "Cliente", key: "cuenta_cliente" },
+  { header: "Cliente ID", key: "cuenta_cliente_id" },
+  { header: "Estado Destino", key: "estado_destino" },
+  { header: "Evento Actual", key: "evento_actual" },
+  { header: "Fecha Creación", key: "fecha_de_creacion" }
+];
+
+// 🚀 Endpoint de prueba
 app.post("/export/test", async (req, res) => {
   try {
     const filters = req.body;
@@ -20,14 +41,11 @@ app.post("/export/test", async (req, res) => {
       `guias_export_${Date.now()}.xlsx`
     );
 
-    // 📘 Workbook en streaming
     const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
       filename: filePath
     });
 
     const sheet = workbook.addWorksheet("Guías");
-
-    // 📌 Definir columnas
     sheet.columns = COLUMNS;
 
     while (true) {
@@ -41,19 +59,12 @@ app.post("/export/test", async (req, res) => {
         query = query.gt("id", lastId);
       }
 
-      // filtros
       if (filters.fecha_desde) {
-        query = query.gte(
-          "fecha_de_creacion",
-          filters.fecha_desde
-        );
+        query = query.gte("fecha_de_creacion", filters.fecha_desde);
       }
 
       if (filters.fecha_hasta) {
-        query = query.lte(
-          "fecha_de_creacion",
-          filters.fecha_hasta
-        );
+        query = query.lte("fecha_de_creacion", filters.fecha_hasta);
       }
 
       if (filters.cuenta_cliente_id) {
@@ -88,4 +99,10 @@ app.post("/export/test", async (req, res) => {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// 🌐 Render REQUIERE esto
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Export service running on port ${PORT}`);
 });
