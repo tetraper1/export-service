@@ -1,3 +1,17 @@
+import express from "express";
+import { createClient } from "@supabase/supabase-js";
+
+const app = express();
+app.use(express.json());
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+
+// ===============================
+// ENDPOINT DE PRUEBA CON FILTROS
+// ===============================
 app.post("/export/test", async (req, res) => {
   try {
     const {
@@ -24,7 +38,7 @@ app.post("/export/test", async (req, res) => {
         query = query.gt("id", lastId);
       }
 
-      // 🧩 filtros dinámicos
+      // 🧩 filtros
       if (fecha_desde) {
         query = query.gte("fecha_de_creacion", fecha_desde);
       }
@@ -57,7 +71,7 @@ app.post("/export/test", async (req, res) => {
       total += data.length;
 
       console.log(
-        `Página OK. Último ID: ${lastId} | Total: ${total}`
+        `Página OK | Último ID: ${lastId} | Total: ${total}`
       );
     }
 
@@ -69,4 +83,12 @@ app.post("/export/test", async (req, res) => {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// ===============================
+// START SERVER
+// ===============================
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Export test running on port ${PORT}`);
 });
