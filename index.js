@@ -2,6 +2,7 @@ import express from "express";
 import { createClient } from "@supabase/supabase-js";
 import ExcelJS from "exceljs";
 import path from "path";
+import fs from "fs";
 
 const app = express();
 app.use(express.json());
@@ -93,7 +94,7 @@ app.post("/export/test", async (req, res) => {
     res.json({
       ok: true,
       filas_exportadas: total,
-      file: filePath
+      download_url: `/export/download?file=${path.basename(filePath)}`
     });
   } catch (err) {
     console.error(err);
@@ -102,6 +103,46 @@ app.post("/export/test", async (req, res) => {
 });
 
 // 🌐 Render REQUIERE esto
+app.get("/export/download", async (req, res) => {
+  try {
+    const { file } = req.query;
+
+    if (!file) {
+      return res.status(400).json({ error: "file requerido" });
+    }
+
+    const filePath = path.join("/tmp", file);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: "Archivo no encontrado" });
+    }
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${file}"`
+    );
+
+    const stream = fs.createReadStream(filePath);
+
+    stream.pipe(res);
+
+    // 🔥 borrar archivo cuando termina la descarga
+    stream.on("end", () => {
+      fs.unlink(filePath, err => {
+        if (err) console.error("Error borrando archivo:", err);
+        else console.log("Archivo eliminado:", file);
+      });
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Export service running on port ${PORT}`);
