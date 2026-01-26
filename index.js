@@ -137,11 +137,16 @@ app.post("/export/test", async (req, res) => {
       return res.status(400).json({ error: "No hay columnas válidas" });
     }
 
-    const excelColumns = finalColumnKeys.map(key => {
-  const col = { ...COLUMN_MAP[key] };
+    const excelColumns = finalColumnKeys.map((key) => {
+      const col = { ...COLUMN_MAP[key], key };
+    
+      if (DATE_COLS.has(key)) {
+        col.style = { numFmt: "yyyy-mm-dd hh:mm" }; // 24h, no AM/PM
+      }
+    
+      return col;
+    });
 
-  return col;
-});
     
     const selectColumns = ["id", ...finalColumnKeys];
 
@@ -166,11 +171,17 @@ app.post("/export/test", async (req, res) => {
       if (!data || data.length === 0) break;
 
 for (const row of data) {
-  const excelRow = sheet.addRow({ ...row });
+  const out = { ...row };
 
+  // Convierte ISO -> Date SOLO en columnas de fecha
+  for (const k of DATE_COLS) {
+    const v = row[k];
+    if (v) out[k] = new Date(v);
+  }
 
-  excelRow.commit();
+  sheet.addRow(out).commit();
 }
+
 
 
       lastId = data[data.length - 1].id;
@@ -191,6 +202,16 @@ for (const row of data) {
     return res.status(500).json({ error: err.message });
   }
 });
+
+// Columnas que son fecha/hora
+const DATE_COLS = new Set([
+  "fecha_de_creacion",
+  "fecha_embarcado",
+  "fecha_entregado",
+  "fecha_recolectado",
+  "fecha_ultima_actualizacion",
+]);
+
 
 // Descarga
 app.get("/export/download", (req, res) => {
