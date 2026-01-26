@@ -7,13 +7,13 @@ import fs from "fs";
 const app = express();
 app.use(express.json());
 
-// 🔐 Supabase client (OBLIGATORIO)
+// Supabase client
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// 📌 Columnas del XLSX (OBLIGATORIO)
+// Columnas permitidas
 const COLUMNS = [
   { header: "calle_destino", key: "calle_destino" },
   { header: "calle_remitente_origen", key: "calle_remitente_origen" },
@@ -62,8 +62,12 @@ const COLUMNS = [
   { header: "valor_declarado", key: "valor_declarado" }
 ];
 
+// Mapa rápido de columnas
+const COLUMN_MAP = Object.fromEntries(
+  COLUMNS.map(col => [col.key, col])
+);
 
-// 🚀 Endpoint de prueba
+// Endpoint export
 app.post("/export/test", async (req, res) => {
   try {
     const filters = req.body;
@@ -71,6 +75,27 @@ app.post("/export/test", async (req, res) => {
     const PAGE_SIZE = 2000;
     let lastId = null;
     let total = 0;
+
+    // 🔹 Columnas solicitadas
+    const requestedColumns = Array.isArray(filters.columnas)
+      ? filters.columnas
+      : [];
+
+    // 🔹 Validar + ordenar alfabéticamente
+    const finalColumnKeys =
+      requestedColumns.length > 0
+        ? requestedColumns
+            .filter(col => COLUMN_MAP[col])
+            .sort((a, b) => a.localeCompare(b))
+        : COLUMNS.map(c => c.key);
+
+    if (finalColumnKeys.length === 0) {
+      return res.status(400).json({
+        error: "No se enviaron columnas válidas"
+      });
+    }
+
+    const excelColumns = finalColumnKeys.map(key => COLUMN_MAP[key]);
 
     const filePath = path.join(
       "/tmp",
@@ -82,32 +107,22 @@ app.post("/export/test", async (req, res) => {
     });
 
     const sheet = workbook.addWorksheet("Guías");
-    sheet.columns = COLUMNS;
+    sheet.columns = excelColumns;
+
+    const selectColumns = ["id", ...finalColumnKeys];
 
     while (true) {
       let query = supabase
         .from("vw_guias_report")
-        .select(["id", ...COLUMNS.map(c => c.key)].join(","))
+        .select(selectColumns.join(","))
         .order("id", { ascending: true })
         .limit(PAGE_SIZE);
 
-      if (lastId) {
-        query = query.gt("id", lastId);
-      }
-
-      if (filters.fecha_desde) {
-        query = query.gte("fecha_de_creacion", filters.fecha_desde);
-      }
-
-      if (filters.fecha_hasta) {
-        query = query.lte("fecha_de_creacion", filters.fecha_hasta);
-      }
-
+      if (lastId) query = query.gt("id", lastId);
+      if (filters.fecha_desde) query = query.gte("fecha_de_creacion", filters.fecha_desde);
+      if (filters.fecha_hasta) query = query.lte("fecha_de_creacion", filters.fecha_hasta);
       if (filters.cuenta_cliente_id) {
-        query = query.eq(
-          "cuenta_cliente_id",
-          filters.cuenta_cliente_id
-        );
+        query = query.eq("cuenta_cliente_id", filters.cuenta_cliente_id);
       }
 
       const { data, error } = await query;
@@ -120,8 +135,6 @@ app.post("/export/test", async (req, res) => {
 
       lastId = data[data.length - 1].id;
       total += data.length;
-
-      console.log(`XLSX rows: ${total}`);
     }
 
     await workbook.commit();
@@ -129,55 +142,41 @@ app.post("/export/test", async (req, res) => {
     res.json({
       ok: true,
       filas_exportadas: total,
+      columnas: finalColumnKeys,
       download_url: `/export/download?file=${path.basename(filePath)}`
     });
+
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// 🌐 Render REQUIERE esto
+// Descarga
 app.get("/export/download", async (req, res) => {
-  try {
-    const { file } = req.query;
+  const { file } = req.query;
+  if (!file) return res.status(400).json({ error: "file requerido" });
 
-    if (!file) {
-      return res.status(400).json({ error: "file requerido" });
-    }
-
-    const filePath = path.join("/tmp", file);
-
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ error: "Archivo no encontrado" });
-    }
-
-    res.setHeader(
-      "Content-Type",
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    );
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${file}"`
-    );
-
-    const stream = fs.createReadStream(filePath);
-
-    stream.pipe(res);
-
-    // 🔥 borrar archivo cuando termina la descarga
-    stream.on("end", () => {
-      fs.unlink(filePath, err => {
-        if (err) console.error("Error borrando archivo:", err);
-        else console.log("Archivo eliminado:", file);
-      });
-    });
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
+  const filePath = path.join("/tmp", file);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: "Archivo no encontrado" });
   }
+
+  res.setHeader(
+    "Content-Type",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  );
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="${file}"`
+  );
+
+  const stream = fs.createReadStream(filePath);
+  stream.pipe(res);
+
+  stream.on("end", () => fs.unlink(filePath, () => {}));
 });
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Export service running on port ${PORT}`);
