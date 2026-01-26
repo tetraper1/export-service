@@ -152,9 +152,12 @@ app.post("/export/test", async (req, res) => {
 
     const filePath = path.join("/tmp", `guias_export_${Date.now()}.xlsx`);
 
-    const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
-      filename: filePath
-    });
+const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
+  filename: filePath,
+  useStyles: true,        
+  useSharedStrings: true  
+});
+
 
     const sheet = workbook.addWorksheet("Guías");
     sheet.columns = excelColumns;
