@@ -13,7 +13,7 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// Columnas permitidas
+// Columnas permitidas para export
 const COLUMNS = [
   { header: "calle_destino", key: "calle_destino" },
   { header: "calle_remitente_origen", key: "calle_remitente_origen" },
@@ -30,6 +30,7 @@ const COLUMNS = [
   { header: "estado_destino", key: "estado_destino" },
   { header: "estado_remitente_origen", key: "estado_remitente_origen" },
   { header: "evento_actual", key: "evento_actual" },
+  { header: "evento_actual_id_nivel", key: "evento_actual_id_nivel" },
   { header: "fecha_de_creacion", key: "fecha_de_creacion" },
   { header: "fecha_embarcado", key: "fecha_embarcado" },
   { header: "fecha_entregado", key: "fecha_entregado" },
@@ -62,26 +63,69 @@ const COLUMNS = [
   { header: "valor_declarado", key: "valor_declarado" }
 ];
 
-// Mapa rápido de columnas
+// Índice rápido
 const COLUMN_MAP = Object.fromEntries(
   COLUMNS.map(col => [col.key, col])
 );
+
+// Builder de filtros (NO paginación aquí)
+const buildQuery = (filters, selectColumns) => {
+  let query = supabase
+    .from("vw_guias_report")
+    .select(selectColumns.join(","));
+
+  if (filters.fecha_desde) {
+    query = query.gte("fecha_de_creacion", filters.fecha_desde);
+  }
+
+  if (filters.fecha_hasta) {
+    query = query.lte("fecha_de_creacion", filters.fecha_hasta);
+  }
+
+  if (Array.isArray(filters.numeros_guia) && filters.numeros_guia.length) {
+    query = query.in("numero_de_guia", filters.numeros_guia);
+  }
+
+  if (Array.isArray(filters.codigos_rastreo) && filters.codigos_rastreo.length) {
+    query = query.in("codigo_rastreo", filters.codigos_rastreo);
+  }
+
+  if (Array.isArray(filters.guias_madre) && filters.guias_madre.length) {
+    query = query.in("guia_madre", filters.guias_madre);
+  }
+
+  if (Array.isArray(filters.cuenta_cliente_id) && filters.cuenta_cliente_id.length) {
+    query = query.in("cuenta_cliente_id", filters.cuenta_cliente_id);
+  }
+
+  if (Array.isArray(filters.ultima_sucursal) && filters.ultima_sucursal.length) {
+    query = query.in("ultima_sucursal", filters.ultima_sucursal);
+  }
+
+  if (Array.isArray(filters.nombres_ruta_entrega) && filters.nombres_ruta_entrega.length) {
+    query = query.in("nombre_ruta_entrega", filters.nombres_ruta_entrega);
+  }
+
+  if (Array.isArray(filters.evento_actual_id_nivel) && filters.evento_actual_id_nivel.length) {
+    query = query.in("evento_actual_id_nivel", filters.evento_actual_id_nivel);
+  }
+
+  return query;
+};
 
 // Endpoint export
 app.post("/export/test", async (req, res) => {
   try {
     const filters = req.body;
-
     const PAGE_SIZE = 2000;
     let lastId = null;
     let total = 0;
 
-    // 🔹 Columnas solicitadas
+    // Columnas solicitadas
     const requestedColumns = Array.isArray(filters.columnas)
       ? filters.columnas
       : [];
 
-    // 🔹 Validar + ordenar alfabéticamente
     const finalColumnKeys =
       requestedColumns.length > 0
         ? requestedColumns
@@ -90,17 +134,13 @@ app.post("/export/test", async (req, res) => {
         : COLUMNS.map(c => c.key);
 
     if (finalColumnKeys.length === 0) {
-      return res.status(400).json({
-        error: "No se enviaron columnas válidas"
-      });
+      return res.status(400).json({ error: "No hay columnas válidas" });
     }
 
     const excelColumns = finalColumnKeys.map(key => COLUMN_MAP[key]);
+    const selectColumns = ["id", ...finalColumnKeys];
 
-    const filePath = path.join(
-      "/tmp",
-      `guias_export_${Date.now()}.xlsx`
-    );
+    const filePath = path.join("/tmp", `guias_export_${Date.now()}.xlsx`);
 
     const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
       filename: filePath
@@ -109,21 +149,12 @@ app.post("/export/test", async (req, res) => {
     const sheet = workbook.addWorksheet("Guías");
     sheet.columns = excelColumns;
 
-    const selectColumns = ["id", ...finalColumnKeys];
-
     while (true) {
-      let query = supabase
-        .from("vw_guias_report")
-        .select(selectColumns.join(","))
+      let query = buildQuery(filters, selectColumns)
         .order("id", { ascending: true })
         .limit(PAGE_SIZE);
 
       if (lastId) query = query.gt("id", lastId);
-      if (filters.fecha_desde) query = query.gte("fecha_de_creacion", filters.fecha_desde);
-      if (filters.fecha_hasta) query = query.lte("fecha_de_creacion", filters.fecha_hasta);
-      if (filters.cuenta_cliente_id) {
-        query = query.eq("cuenta_cliente_id", filters.cuenta_cliente_id);
-      }
 
       const { data, error } = await query;
       if (error) throw error;
@@ -139,7 +170,7 @@ app.post("/export/test", async (req, res) => {
 
     await workbook.commit();
 
-    res.json({
+    return res.json({
       ok: true,
       filas_exportadas: total,
       columnas: finalColumnKeys,
@@ -148,12 +179,12 @@ app.post("/export/test", async (req, res) => {
 
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err.message });
   }
 });
 
 // Descarga
-app.get("/export/download", async (req, res) => {
+app.get("/export/download", (req, res) => {
   const { file } = req.query;
   if (!file) return res.status(400).json({ error: "file requerido" });
 
@@ -173,7 +204,6 @@ app.get("/export/download", async (req, res) => {
 
   const stream = fs.createReadStream(filePath);
   stream.pipe(res);
-
   stream.on("end", () => fs.unlink(filePath, () => {}));
 });
 
