@@ -149,12 +149,6 @@ app.post("/export/test", async (req, res) => {
     const excelColumns = finalColumnKeys.map(key => {
   const col = { ...COLUMN_MAP[key] };
 
-  if (DATE_COLUMNS.has(key)) {
-    col.style = {
-      numFmt: "[$-en-CA]yyyy-mm-dd hh:mm"
-    };
-  }
-
   return col;
 });
     
@@ -180,17 +174,24 @@ app.post("/export/test", async (req, res) => {
       if (error) throw error;
       if (!data || data.length === 0) break;
 
-      for (const row of data) {
-        const excelRow = { ...row };
+for (const row of data) {
+  const excelRow = sheet.addRow({ ...row });
 
-for (const key of DATE_COLUMNS) {
-  if (excelRow[key]) {
-    excelRow[key] = new Date(excelRow[key]);
+  for (const key of DATE_COLUMNS) {
+    if (row[key]) {
+      const cell = excelRow.getCell(key);
+
+      // valor Date real
+      cell.value = new Date(row[key]);
+
+      // formato FORZADO
+      cell.numFmt = "yyyy-mm-dd hh:mm";
+    }
   }
+
+  excelRow.commit();
 }
 
-sheet.addRow(excelRow).commit();
-      }
 
       lastId = data[data.length - 1].id;
       total += data.length;
