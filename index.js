@@ -113,15 +113,6 @@ const buildQuery = (filters, selectColumns) => {
   return query;
 };
 
-const DATE_COLUMNS = new Set([
-  "fecha_de_creacion",
-  "fecha_ultima_actualizacion",
-  "fecha_embarcado",
-  "fecha_entregado",
-  "fecha_recolectado"
-]);
-
-
 // Endpoint export
 app.post("/export/test", async (req, res) => {
   try {
@@ -177,17 +168,6 @@ app.post("/export/test", async (req, res) => {
 for (const row of data) {
   const excelRow = sheet.addRow({ ...row });
 
-  for (const key of DATE_COLUMNS) {
-    if (row[key]) {
-      const cell = excelRow.getCell(key);
-
-      // valor Date real
-      cell.value = new Date(row[key]);
-
-      // formato FORZADO
-      cell.numFmt = "yyyy-mm-dd hh:mm";
-    }
-  }
 
   excelRow.commit();
 }
