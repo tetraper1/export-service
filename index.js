@@ -151,7 +151,7 @@ app.post("/export/test", async (req, res) => {
 
   if (DATE_COLUMNS.has(key)) {
     col.style = {
-      numFmt: "yyyy-mm-dd hh:mm"
+      numFmt: "[$-en-CA]yyyy-mm-dd hh:mm"
     };
   }
 
