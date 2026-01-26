@@ -157,7 +157,7 @@ app.post("/export/test", async (req, res) => {
 
   return col;
 });
-    sheet.columns = excelColumns;
+    
     const selectColumns = ["id", ...finalColumnKeys];
 
     const filePath = path.join("/tmp", `guias_export_${Date.now()}.xlsx`);
