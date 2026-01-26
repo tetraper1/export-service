@@ -113,6 +113,8 @@ const buildQuery = (filters, selectColumns) => {
   return query;
 };
 
+const MAX_ROWS = 70000;
+
 // Endpoint export
 app.post("/export/test", async (req, res) => {
   try {
@@ -167,44 +169,42 @@ const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
   }
 }
 
-    while (true) {
-      let query = buildQuery(filters, selectColumns)
-        .order("id", { ascending: true })
-        .limit(PAGE_SIZE);
+    while (total < MAX_ROWS) {
+  const remaining = MAX_ROWS - total;
 
-      if (lastId) query = query.gt("id", lastId);
+  let query = buildQuery(filters, selectColumns)
+    .order("id", { ascending: true })
+    .limit(Math.min(PAGE_SIZE, remaining));
 
-      const { data, error } = await query;
-      if (error) throw error;
-      if (!data || data.length === 0) break;
+  if (lastId) query = query.gt("id", lastId);
 
-for (const row of data) {
-  const out = { ...row };
+  const { data, error } = await query;
+  if (error) throw error;
+  if (!data || data.length === 0) break;
 
-  for (const k of DATE_COLS) {
-    const v = row[k];
-    if (v) out[k] = new Date(v); // guarda como Date real
-  }
+  for (const row of data) {
+    const out = { ...row };
 
-  const r = sheet.addRow(out);
-
-  // Ultra seguro: fija formato por celda también (por si Excel/stream no hereda)
-  for (const k of DATE_COLS) {
-    if (out[k]) {
-      const cell = r.getCell(k);        // funciona porque definiste columns con key
-      cell.numFmt = "yyyy-mm-dd hh:mm";
+    for (const k of DATE_COLS) {
+      const v = row[k];
+      if (v) out[k] = new Date(v);
     }
+
+    const r = sheet.addRow(out);
+
+    for (const k of DATE_COLS) {
+      if (out[k]) {
+        r.getCell(k).numFmt = "yyyy-mm-dd hh:mm";
+      }
+    }
+
+    r.commit();
   }
 
-  r.commit();
+  lastId = data[data.length - 1].id;
+  total += data.length;
 }
 
-
-
-
-      lastId = data[data.length - 1].id;
-      total += data.length;
-    }
 
     await workbook.commit();
 
@@ -212,6 +212,7 @@ for (const row of data) {
       ok: true,
       filas_exportadas: total,
       columnas: finalColumnKeys,
+      limite_aplicado: total === MAX_ROWS,
       download_url: `/export/download?file=${path.basename(filePath)}`
     });
 
