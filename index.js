@@ -157,6 +157,7 @@ app.post("/export/test", async (req, res) => {
 
   return col;
 });
+    sheet.columns = excelColumns;
     const selectColumns = ["id", ...finalColumnKeys];
 
     const filePath = path.join("/tmp", `guias_export_${Date.now()}.xlsx`);
@@ -180,7 +181,15 @@ app.post("/export/test", async (req, res) => {
       if (!data || data.length === 0) break;
 
       for (const row of data) {
-        sheet.addRow(row).commit();
+        const excelRow = { ...row };
+
+for (const key of DATE_COLUMNS) {
+  if (excelRow[key]) {
+    excelRow[key] = new Date(excelRow[key]);
+  }
+}
+
+sheet.addRow(excelRow).commit();
       }
 
       lastId = data[data.length - 1].id;
