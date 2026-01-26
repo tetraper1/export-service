@@ -113,6 +113,15 @@ const buildQuery = (filters, selectColumns) => {
   return query;
 };
 
+const DATE_COLUMNS = new Set([
+  "fecha_de_creacion",
+  "fecha_ultima_actualizacion",
+  "fecha_embarcado",
+  "fecha_entregado",
+  "fecha_recolectado"
+]);
+
+
 // Endpoint export
 app.post("/export/test", async (req, res) => {
   try {
@@ -137,7 +146,17 @@ app.post("/export/test", async (req, res) => {
       return res.status(400).json({ error: "No hay columnas válidas" });
     }
 
-    const excelColumns = finalColumnKeys.map(key => COLUMN_MAP[key]);
+    const excelColumns = finalColumnKeys.map(key => {
+  const col = { ...COLUMN_MAP[key] };
+
+  if (DATE_COLUMNS.has(key)) {
+    col.style = {
+      numFmt: "yyyy-mm-dd hh:mm"
+    };
+  }
+
+  return col;
+});
     const selectColumns = ["id", ...finalColumnKeys];
 
     const filePath = path.join("/tmp", `guias_export_${Date.now()}.xlsx`);
