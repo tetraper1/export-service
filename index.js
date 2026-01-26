@@ -87,7 +87,7 @@ app.post("/export/test", async (req, res) => {
     while (true) {
       let query = supabase
         .from("vw_guias_report")
-        .select(COLUMNS.map(c => c.key).join(","))
+        .select(["id", ...COLUMNS.map(c => c.key)].join(","))
         .order("id", { ascending: true })
         .limit(PAGE_SIZE);
 
