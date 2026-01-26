@@ -161,6 +161,11 @@ const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
 
     const sheet = workbook.addWorksheet("Guías");
     sheet.columns = excelColumns;
+    for (const key of DATE_COLS) {
+  if (finalColumnKeys.includes(key)) {
+    sheet.getColumn(key).numFmt = "yyyy-mm-dd hh:mm";
+  }
+}
 
     while (true) {
       let query = buildQuery(filters, selectColumns)
@@ -176,14 +181,24 @@ const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
 for (const row of data) {
   const out = { ...row };
 
-  // Convierte ISO -> Date SOLO en columnas de fecha
   for (const k of DATE_COLS) {
     const v = row[k];
-    if (v) out[k] = new Date(v);
+    if (v) out[k] = new Date(v); // guarda como Date real
   }
 
-  sheet.addRow(out).commit();
+  const r = sheet.addRow(out);
+
+  // Ultra seguro: fija formato por celda también (por si Excel/stream no hereda)
+  for (const k of DATE_COLS) {
+    if (out[k]) {
+      const cell = r.getCell(k);        // funciona porque definiste columns con key
+      cell.numFmt = "yyyy-mm-dd hh:mm";
+    }
+  }
+
+  r.commit();
 }
+
 
 
 
