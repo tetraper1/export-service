@@ -9,10 +9,20 @@ const app = express();
 app.use(express.json());
 
 // -------------------- Config (Starter-friendly) --------------------
-const MAX_ROWS = 35_000;                  // tu requisito
-const PAGE_SIZE = 5_000;                  // paginado por id (keyset)
-const MAX_CONCURRENT_EXPORTS = Number(process.env.MAX_CONCURRENT_EXPORTS || 1); // Starter: 1 recomendado
-const JOB_TTL_MS = Number(process.env.JOB_TTL_MS || 20 * 60 * 1000);            // 20 min
+const MAX_ROWS = 100_000;
+const PAGE_SIZE = 10_000;
+const MAX_CONCURRENT_EXPORTS = Number(process.env.MAX_CONCURRENT_EXPORTS || 1);
+
+// TTL del job (memoria/registro). Recomendado > TTL del archivo.
+const JOB_TTL_MS = Number(process.env.JOB_TTL_MS || 60 * 60 * 1000); // 60 min
+
+// TTL del ARCHIVO: para no saturar espacio
+const FILE_TTL_MS = Number(process.env.FILE_TTL_MS || 5 * 60 * 1000); // 5 min
+
+// Protección anti-saturación: límite de archivos "ready" en disco simultáneamente
+const MAX_READY_FILES = Number(process.env.MAX_READY_FILES || 20);
+
+// Límite de jobs (en memoria)
 const MAX_PENDING_JOBS = Number(process.env.MAX_PENDING_JOBS || 200);
 
 // -------------------- Supabase --------------------
@@ -71,7 +81,7 @@ const COLUMNS = [
   { header: "valor_declarado", key: "valor_declarado" }
 ];
 
-const COLUMN_MAP = Object.fromEntries(COLUMNS.map(c => [c.key, c]));
+const COLUMN_MAP = Object.fromEntries(COLUMNS.map((c) => [c.key, c]));
 
 const DATE_COLS = new Set([
   "fecha_de_creacion",
@@ -154,15 +164,37 @@ function makeId() {
   return crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString("hex");
 }
 
+// Limpieza:
+// - Expira ARCHIVO por FILE_TTL_MS (libera disco) y marca job como "expired"
+// - Limpia JOB por JOB_TTL_MS (libera memoria)
 function cleanupJobs() {
   const t = now();
+
   for (const [jobId, job] of jobs) {
+    // 1) Expirar archivo para liberar espacio
+    if (job.status === "ready" && job.fileCreatedAt) {
+      if (t - job.fileCreatedAt > FILE_TTL_MS) {
+        if (job.filePath && fs.existsSync(job.filePath)) {
+          fs.unlink(job.filePath, () => {});
+        }
+        job.filePath = null;
+        job.fileName = null;
+        job.status = "expired"; // indicar que no hay archivo ya
+        job.updatedAt = now();
+        continue;
+      }
+    }
+
+    // Limpiar jobs viejos (memoria)
     if (t - job.updatedAt > JOB_TTL_MS) {
-      if (job.filePath && fs.existsSync(job.filePath)) fs.unlink(job.filePath, () => {});
+      if (job.filePath && fs.existsSync(job.filePath)) {
+        fs.unlink(job.filePath, () => {});
+      }
       jobs.delete(jobId);
     }
   }
 }
+
 setInterval(cleanupJobs, 60_000).unref();
 
 // -------------------- Excel generation --------------------
@@ -176,8 +208,8 @@ async function generateExcelJob(jobId, filters) {
   const requestedColumns = Array.isArray(filters.columnas) ? filters.columnas : [];
   const finalColumnKeys =
     requestedColumns.length > 0
-      ? requestedColumns.filter(col => COLUMN_MAP[col]).sort((a, b) => a.localeCompare(b))
-      : COLUMNS.map(c => c.key);
+      ? requestedColumns.filter((col) => COLUMN_MAP[col]).sort((a, b) => a.localeCompare(b))
+      : COLUMNS.map((c) => c.key);
 
   if (finalColumnKeys.length === 0) {
     job.status = "error";
@@ -206,7 +238,6 @@ async function generateExcelJob(jobId, filters) {
   const sheet = workbook.addWorksheet("Guías");
   sheet.columns = excelColumns;
 
-  // Define numFmt por columna (evita costo por celda)
   for (const key of DATE_COLS) {
     if (finalColumnKeys.includes(key)) sheet.getColumn(key).numFmt = "yyyy-mm-dd hh:mm";
   }
@@ -228,7 +259,6 @@ async function generateExcelJob(jobId, filters) {
     if (!data || data.length === 0) break;
 
     for (const row of data) {
-      // Mutación ligera de fechas
       for (const k of DATE_COLS) if (row[k]) row[k] = new Date(row[k]);
       sheet.addRow(row).commit();
     }
@@ -246,16 +276,24 @@ async function generateExcelJob(jobId, filters) {
   job.rows = total;
   job.filePath = filePath;
   job.fileName = fileName;
+  job.fileCreatedAt = now(); // desde aquí corre FILE_TTL_MS
   job.updatedAt = now();
 }
 
 // -------------------- Endpoints --------------------
 
-// 1) Crear export (responde rápido, sin timeouts)
+// 1) Crear export
 app.post("/export", async (req, res) => {
   try {
+    // Protección por jobs
     if (jobs.size >= MAX_PENDING_JOBS) {
       return res.status(429).json({ error: "Demasiados exports en cola. Intenta más tarde." });
+    }
+
+    // Protección por archivos listos en disco (anti-saturación)
+    const readyCount = [...jobs.values()].filter((j) => j.status === "ready").length;
+    if (readyCount >= MAX_READY_FILES) {
+      return res.status(429).json({ error: "Hay demasiados archivos listos para descargar. Intenta más tarde." });
     }
 
     const filters = req.body || {};
@@ -263,13 +301,14 @@ app.post("/export", async (req, res) => {
 
     jobs.set(jobId, {
       id: jobId,
-      status: "queued", // queued | processing | ready | error
+      status: "queued", // queued | processing | ready | expired | error
       createdAt: now(),
       updatedAt: now(),
       rows: 0,
       error: null,
       filePath: null,
       fileName: null,
+      fileCreatedAt: null,
     });
 
     enqueue(async () => {
@@ -311,15 +350,20 @@ app.get("/export/status/:jobId", (req, res) => {
     error: job.error,
     ready: job.status === "ready",
     download_url: job.status === "ready" ? `/export/download/${jobId}` : null,
+    fileCreatedAt: job.fileCreatedAt,
     updatedAt: job.updatedAt,
   });
 });
 
-// 3) Descargar (streaming del archivo local)
+// 3) Descargar
 app.get("/export/download/:jobId", (req, res) => {
   const { jobId } = req.params;
   const job = jobs.get(jobId);
   if (!job) return res.status(404).json({ error: "Job no encontrado" });
+
+  if (job.status === "expired") {
+    return res.status(410).json({ error: "Archivo expiró. Genera uno nuevo." });
+  }
 
   if (job.status !== "ready" || !job.filePath) {
     return res.status(409).json({ error: "Archivo aún no está listo", status: job.status });
@@ -341,7 +385,6 @@ app.get("/export/download/:jobId", (req, res) => {
     else res.end();
   });
 
-  // No borramos al final para permitir reintentos; se limpia por TTL.
   stream.pipe(res);
 });
 
@@ -351,7 +394,6 @@ const server = app.listen(PORT, () => {
   console.log(`Export service running on port ${PORT}`);
 });
 
-// Evita timeouts del server Node (la plataforma puede imponer límites)
 server.requestTimeout = 0;
 server.headersTimeout = 0;
 server.keepAliveTimeout = 65_000;
