@@ -113,7 +113,7 @@ const buildQuery = (filters, selectColumns) => {
   return query;
 };
 
-const MAX_ROWS = 70000;
+const MAX_ROWS = 35000;
 
 // Endpoint export
 app.post("/export/test", async (req, res) => {
