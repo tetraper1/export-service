@@ -3,9 +3,23 @@ import { createClient } from "@supabase/supabase-js";
 import ExcelJS from "exceljs";
 import path from "path";
 import fs from "fs";
+import crypto from "crypto";
 
 const app = express();
 app.use(express.json());
+
+// --- Ajustes clave para Starter ---
+const MAX_ROWS = 100_000;
+const PAGE_SIZE = 10_000;
+
+// Cuántos excels se generan al mismo tiempo (Starter: 1 recomendado)
+const MAX_CONCURRENT_EXPORTS = Number(process.env.MAX_CONCURRENT_EXPORTS || 1);
+
+// TTL de archivos/job en ms (ej: 20 min)
+const JOB_TTL_MS = Number(process.env.JOB_TTL_MS || 20 * 60 * 1000);
+
+// Límite para evitar que te hagan DoS con miles de jobs
+const MAX_PENDING_JOBS = Number(process.env.MAX_PENDING_JOBS || 200);
 
 // Supabase client
 const supabase = createClient(
@@ -63,166 +77,8 @@ const COLUMNS = [
   { header: "valor_declarado", key: "valor_declarado" }
 ];
 
-// Índice rápido
-const COLUMN_MAP = Object.fromEntries(
-  COLUMNS.map(col => [col.key, col])
-);
+const COLUMN_MAP = Object.fromEntries(COLUMNS.map(col => [col.key, col]));
 
-// Builder de filtros (NO paginación aquí)
-const buildQuery = (filters, selectColumns) => {
-  let query = supabase
-    .from("vw_guias_report")
-    .select(selectColumns.join(","));
-
-  if (filters.fecha_desde) {
-    query = query.gte("fecha_de_creacion", filters.fecha_desde);
-  }
-
-  if (filters.fecha_hasta) {
-    query = query.lte("fecha_de_creacion", filters.fecha_hasta);
-  }
-
-  if (Array.isArray(filters.numeros_guia) && filters.numeros_guia.length) {
-    query = query.in("numero_de_guia", filters.numeros_guia);
-  }
-
-  if (Array.isArray(filters.codigos_rastreo) && filters.codigos_rastreo.length) {
-    query = query.in("codigo_rastreo", filters.codigos_rastreo);
-  }
-
-  if (Array.isArray(filters.guias_madre) && filters.guias_madre.length) {
-    query = query.in("guia_madre", filters.guias_madre);
-  }
-
-  if (Array.isArray(filters.cuenta_cliente_id) && filters.cuenta_cliente_id.length) {
-    query = query.in("cuenta_cliente_id", filters.cuenta_cliente_id);
-  }
-
-  if (Array.isArray(filters.ultima_sucursal) && filters.ultima_sucursal.length) {
-    query = query.in("ultima_sucursal", filters.ultima_sucursal);
-  }
-
-  if (Array.isArray(filters.nombres_ruta_entrega) && filters.nombres_ruta_entrega.length) {
-    query = query.in("nombre_ruta_entrega", filters.nombres_ruta_entrega);
-  }
-
-  if (Array.isArray(filters.evento_actual_id_nivel) && filters.evento_actual_id_nivel.length) {
-    query = query.in("evento_actual_id_nivel", filters.evento_actual_id_nivel);
-  }
-
-  return query;
-};
-
-const MAX_ROWS = 35000;
-
-// Endpoint export
-app.post("/export/test", async (req, res) => {
-  try {
-    const filters = req.body;
-    const PAGE_SIZE = 5000;
-    let lastId = null;
-    let total = 0;
-
-    // Columnas solicitadas
-    const requestedColumns = Array.isArray(filters.columnas)
-      ? filters.columnas
-      : [];
-
-    const finalColumnKeys =
-      requestedColumns.length > 0
-        ? requestedColumns
-            .filter(col => COLUMN_MAP[col])
-            .sort((a, b) => a.localeCompare(b))
-        : COLUMNS.map(c => c.key);
-
-    if (finalColumnKeys.length === 0) {
-      return res.status(400).json({ error: "No hay columnas válidas" });
-    }
-
-    const excelColumns = finalColumnKeys.map((key) => {
-      const col = { ...COLUMN_MAP[key], key };
-    
-      if (DATE_COLS.has(key)) {
-        col.style = { numFmt: "yyyy-mm-dd hh:mm" }; // 24h, no AM/PM
-      }
-    
-      return col;
-    });
-
-    
-    const selectColumns = ["id", ...finalColumnKeys];
-
-    const filePath = path.join("/tmp", `guias_export_${Date.now()}.xlsx`);
-
-const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
-  filename: filePath,
-  useStyles: true,        
-  useSharedStrings: true  
-});
-
-
-    const sheet = workbook.addWorksheet("Guías");
-    sheet.columns = excelColumns;
-    for (const key of DATE_COLS) {
-  if (finalColumnKeys.includes(key)) {
-    sheet.getColumn(key).numFmt = "yyyy-mm-dd hh:mm";
-  }
-}
-
-    while (total < MAX_ROWS) {
-  const remaining = MAX_ROWS - total;
-
-  let query = buildQuery(filters, selectColumns)
-    .order("id", { ascending: true })
-    .limit(Math.min(PAGE_SIZE, remaining));
-
-  if (lastId) query = query.gt("id", lastId);
-
-  const { data, error } = await query;
-  if (error) throw error;
-  if (!data || data.length === 0) break;
-
-  for (const row of data) {
-    const out = { ...row };
-
-    for (const k of DATE_COLS) {
-      const v = row[k];
-      if (v) out[k] = new Date(v);
-    }
-
-    const r = sheet.addRow(out);
-
-    for (const k of DATE_COLS) {
-      if (out[k]) {
-        r.getCell(k).numFmt = "yyyy-mm-dd hh:mm";
-      }
-    }
-
-    r.commit();
-  }
-
-  lastId = data[data.length - 1].id;
-  total += data.length;
-}
-
-
-    await workbook.commit();
-
-    return res.json({
-      ok: true,
-      filas_exportadas: total,
-      columnas: finalColumnKeys,
-      limite_aplicado: total === MAX_ROWS,
-      download_url: `/export/download?file=${path.basename(filePath)}`
-    });
-
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-// Columnas que son fecha/hora
 const DATE_COLS = new Set([
   "fecha_de_creacion",
   "fecha_embarcado",
@@ -231,32 +87,302 @@ const DATE_COLS = new Set([
   "fecha_ultima_actualizacion",
 ]);
 
+// Builder de filtros (keyset pagination por id)
+const buildQuery = (filters, selectColumns) => {
+  let query = supabase
+    .from("vw_guias_report")
+    .select(selectColumns.join(","));
 
-// Descarga
-app.get("/export/download", (req, res) => {
-  const { file } = req.query;
-  if (!file) return res.status(400).json({ error: "file requerido" });
+  if (filters.fecha_desde) query = query.gte("fecha_de_creacion", filters.fecha_desde);
+  if (filters.fecha_hasta) query = query.lte("fecha_de_creacion", filters.fecha_hasta);
 
-  const filePath = path.join("/tmp", file);
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: "Archivo no encontrado" });
+  if (Array.isArray(filters.numeros_guia) && filters.numeros_guia.length) {
+    query = query.in("numero_de_guia", filters.numeros_guia);
+  }
+  if (Array.isArray(filters.codigos_rastreo) && filters.codigos_rastreo.length) {
+    query = query.in("codigo_rastreo", filters.codigos_rastreo);
+  }
+  if (Array.isArray(filters.guias_madre) && filters.guias_madre.length) {
+    query = query.in("guia_madre", filters.guias_madre);
+  }
+  if (Array.isArray(filters.cuenta_cliente_id) && filters.cuenta_cliente_id.length) {
+    query = query.in("cuenta_cliente_id", filters.cuenta_cliente_id);
+  }
+  if (Array.isArray(filters.ultima_sucursal) && filters.ultima_sucursal.length) {
+    query = query.in("ultima_sucursal", filters.ultima_sucursal);
+  }
+  if (Array.isArray(filters.nombres_ruta_entrega) && filters.nombres_ruta_entrega.length) {
+    query = query.in("nombre_ruta_entrega", filters.nombres_ruta_entrega);
+  }
+  if (Array.isArray(filters.evento_actual_id_nivel) && filters.evento_actual_id_nivel.length) {
+    query = query.in("evento_actual_id_nivel", filters.evento_actual_id_nivel);
   }
 
-  res.setHeader(
-    "Content-Type",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-  );
-  res.setHeader(
-    "Content-Disposition",
-    `attachment; filename="${file}"`
-  );
+  return query;
+};
 
-  const stream = fs.createReadStream(filePath);
+// ------------------ Cola / Semáforo simple (sin deps) ------------------
+let activeExports = 0;
+const queue = [];
+
+function runNext() {
+  if (activeExports >= MAX_CONCURRENT_EXPORTS) return;
+  const next = queue.shift();
+  if (!next) return;
+
+  activeExports++;
+  next()
+    .catch(() => {})
+    .finally(() => {
+      activeExports--;
+      runNext();
+    });
+}
+
+function enqueue(fn) {
+  return new Promise((resolve, reject) => {
+    queue.push(async () => {
+      try {
+        resolve(await fn());
+      } catch (e) {
+        reject(e);
+      }
+    });
+    runNext();
+  });
+}
+
+// ------------------ Registro de Jobs en memoria ------------------
+/**
+ * job = {
+ *  id, status: queued|processing|ready|error,
+ *  createdAt, updatedAt,
+ *  rows, error,
+ *  filePath, fileName
+ * }
+ */
+const jobs = new Map();
+
+function now() { return Date.now(); }
+
+function makeId() {
+  return crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString("hex");
+}
+
+function cleanupJobs() {
+  const t = now();
+  for (const [jobId, job] of jobs) {
+    if (t - job.updatedAt > JOB_TTL_MS) {
+      if (job.filePath && fs.existsSync(job.filePath)) {
+        fs.unlink(job.filePath, () => {});
+      }
+      jobs.delete(jobId);
+    }
+  }
+}
+setInterval(cleanupJobs, 60_000).unref();
+
+// ------------------ Generación Excel (streaming) ------------------
+async function generateExcelJob(jobId, filters) {
+  const job = jobs.get(jobId);
+  if (!job) return;
+
+  job.status = "processing";
+  job.updatedAt = now();
+
+  // Columnas solicitadas
+  const requestedColumns = Array.isArray(filters.columnas) ? filters.columnas : [];
+  const finalColumnKeys =
+    requestedColumns.length > 0
+      ? requestedColumns.filter(col => COLUMN_MAP[col]).sort((a, b) => a.localeCompare(b))
+      : COLUMNS.map(c => c.key);
+
+  if (finalColumnKeys.length === 0) {
+    job.status = "error";
+    job.error = "No hay columnas válidas";
+    job.updatedAt = now();
+    return;
+  }
+
+  const excelColumns = finalColumnKeys.map((key) => {
+    const base = COLUMN_MAP[key];
+    // Estilos por columna (no por celda/fila)
+    if (DATE_COLS.has(key)) {
+      return { ...base, key, style: { numFmt: "yyyy-mm-dd hh:mm" } };
+    }
+    return { ...base, key };
+  });
+
+  const selectColumns = ["id", ...finalColumnKeys];
+
+  const fileName = `guias_export_${jobId}.xlsx`;
+  const filePath = path.join("/tmp", fileName);
+
+  // useSharedStrings=false suele reducir memoria en streaming
+  const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
+    filename: filePath,
+    useStyles: true,
+    useSharedStrings: false,
+  });
+
+  const sheet = workbook.addWorksheet("Guías");
+  sheet.columns = excelColumns;
+
+  // Asegura el formato de fecha a nivel columna
+  for (const key of DATE_COLS) {
+    if (finalColumnKeys.includes(key)) {
+      sheet.getColumn(key).numFmt = "yyyy-mm-dd hh:mm";
+    }
+  }
+
+  let total = 0;
+  let lastId = null;
+
+  while (total < MAX_ROWS) {
+    const remaining = MAX_ROWS - total;
+
+    let query = buildQuery(filters, selectColumns)
+      .order("id", { ascending: true })
+      .limit(Math.min(PAGE_SIZE, remaining));
+
+    if (lastId) query = query.gt("id", lastId);
+
+    const { data, error } = await query;
+    if (error) throw error;
+    if (!data || data.length === 0) break;
+
+    for (const row of data) {
+      // Mutación ligera para fechas (sin estilos por celda)
+      for (const k of DATE_COLS) {
+        if (row[k]) row[k] = new Date(row[k]);
+      }
+      sheet.addRow(row).commit();
+    }
+
+    lastId = data[data.length - 1].id;
+    total += data.length;
+
+    job.rows = total;
+    job.updatedAt = now();
+  }
+
+  await workbook.commit();
+
+  job.status = "ready";
+  job.rows = total;
+  job.filePath = filePath;
+  job.fileName = fileName;
+  job.updatedAt = now();
+}
+
+// ------------------ Endpoints ------------------
+
+// Crea job (rápido, sin timeout)
+app.post("/export", async (req, res) => {
+  try {
+    if (jobs.size >= MAX_PENDING_JOBS) {
+      return res.status(429).json({ error: "Demasiados exports en cola. Intenta más tarde." });
+    }
+
+    const filters = req.body || {};
+    const jobId = makeId();
+
+    jobs.set(jobId, {
+      id: jobId,
+      status: "queued",
+      createdAt: now(),
+      updatedAt: now(),
+      rows: 0,
+      error: null,
+      filePath: null,
+      fileName: null,
+    });
+
+    // Encolar generación (control de concurrencia)
+    enqueue(async () => {
+      try {
+        await generateExcelJob(jobId, filters);
+      } catch (err) {
+        const job = jobs.get(jobId);
+        if (job) {
+          job.status = "error";
+          job.error = err?.message || "Error generando excel";
+          job.updatedAt = now();
+        }
+      }
+    }).catch(() => {});
+
+    // Responder inmediato
+    return res.status(202).json({
+      ok: true,
+      jobId,
+      status_url: `/export/status/${jobId}`,
+      // descarga solo cuando esté listo:
+      download_url: `/export/download/${jobId}`,
+      note: "El archivo se genera en background. Consulta status_url hasta que esté ready."
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Consulta estado/progreso
+app.get("/export/status/:jobId", (req, res) => {
+  const { jobId } = req.params;
+  const job = jobs.get(jobId);
+  if (!job) return res.status(404).json({ error: "Job no encontrado" });
+
+  return res.json({
+    id: job.id,
+    status: job.status,
+    rows: job.rows,
+    error: job.error,
+    ready: job.status === "ready",
+    download_url: job.status === "ready" ? `/export/download/${jobId}` : null,
+    updatedAt: job.updatedAt,
+  });
+});
+
+// Descarga (stream) + borrado opcional tras descargar
+app.get("/export/download/:jobId", (req, res) => {
+  const { jobId } = req.params;
+  const job = jobs.get(jobId);
+  if (!job) return res.status(404).json({ error: "Job no encontrado" });
+
+  if (job.status !== "ready" || !job.filePath) {
+    return res.status(409).json({ error: "Archivo aún no está listo", status: job.status });
+  }
+
+  if (!fs.existsSync(job.filePath)) {
+    return res.status(404).json({ error: "Archivo no encontrado en disco (expiró o se limpió)" });
+  }
+
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="${job.fileName}"`);
+  // Ayuda a que proxies no intenten “buffer” (no siempre aplica en Render, pero no estorba)
+  res.setHeader("X-Accel-Buffering", "no");
+
+  const stream = fs.createReadStream(job.filePath);
+
+  stream.on("error", (e) => {
+    console.error("read stream error", e);
+    if (!res.headersSent) res.status(500).json({ error: "Error leyendo archivo" });
+    else res.end();
+  });
+
+  // Si quieres borrar tras la primera descarga:
+  // - OJO: si 2 usuarios intentan bajar el mismo job, el 2do podría fallar.
+  // Mejor: borrar por TTL (ya implementado). Aquí NO borramos al finalizar.
   stream.pipe(res);
-  stream.on("end", () => fs.unlink(filePath, () => {}));
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`Export service running on port ${PORT}`);
 });
+
+// Evita timeouts del server Node (la plataforma puede tener límites propios, pero esto ayuda)
+server.requestTimeout = 0;     // Node 18+
+server.headersTimeout = 0;
+server.keepAliveTimeout = 65_000;
