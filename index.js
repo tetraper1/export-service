@@ -8,26 +8,20 @@ import crypto from "crypto";
 const app = express();
 app.use(express.json());
 
-// --- Ajustes clave para Starter ---
-const MAX_ROWS = 100_000;
-const PAGE_SIZE = 10_000;
-
-// Cuántos excels se generan al mismo tiempo (Starter: 1 recomendado)
-const MAX_CONCURRENT_EXPORTS = Number(process.env.MAX_CONCURRENT_EXPORTS || 1);
-
-// TTL de archivos/job en ms (ej: 20 min)
-const JOB_TTL_MS = Number(process.env.JOB_TTL_MS || 20 * 60 * 1000);
-
-// Límite para evitar que te hagan DoS con miles de jobs
+// -------------------- Config (Starter-friendly) --------------------
+const MAX_ROWS = 35_000;                  // tu requisito
+const PAGE_SIZE = 5_000;                  // paginado por id (keyset)
+const MAX_CONCURRENT_EXPORTS = Number(process.env.MAX_CONCURRENT_EXPORTS || 1); // Starter: 1 recomendado
+const JOB_TTL_MS = Number(process.env.JOB_TTL_MS || 20 * 60 * 1000);            // 20 min
 const MAX_PENDING_JOBS = Number(process.env.MAX_PENDING_JOBS || 200);
 
-// Supabase client
+// -------------------- Supabase --------------------
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// Columnas permitidas para export
+// -------------------- Columnas --------------------
 const COLUMNS = [
   { header: "calle_destino", key: "calle_destino" },
   { header: "calle_remitente_origen", key: "calle_remitente_origen" },
@@ -77,7 +71,7 @@ const COLUMNS = [
   { header: "valor_declarado", key: "valor_declarado" }
 ];
 
-const COLUMN_MAP = Object.fromEntries(COLUMNS.map(col => [col.key, col]));
+const COLUMN_MAP = Object.fromEntries(COLUMNS.map(c => [c.key, c]));
 
 const DATE_COLS = new Set([
   "fecha_de_creacion",
@@ -87,7 +81,7 @@ const DATE_COLS = new Set([
   "fecha_ultima_actualizacion",
 ]);
 
-// Builder de filtros (keyset pagination por id)
+// -------------------- Query builder (keyset pagination) --------------------
 const buildQuery = (filters, selectColumns) => {
   let query = supabase
     .from("vw_guias_report")
@@ -121,7 +115,7 @@ const buildQuery = (filters, selectColumns) => {
   return query;
 };
 
-// ------------------ Cola / Semáforo simple (sin deps) ------------------
+// -------------------- Simple queue (no deps) --------------------
 let activeExports = 0;
 const queue = [];
 
@@ -152,18 +146,9 @@ function enqueue(fn) {
   });
 }
 
-// ------------------ Registro de Jobs en memoria ------------------
-/**
- * job = {
- *  id, status: queued|processing|ready|error,
- *  createdAt, updatedAt,
- *  rows, error,
- *  filePath, fileName
- * }
- */
+// -------------------- Jobs registry (in-memory) --------------------
 const jobs = new Map();
-
-function now() { return Date.now(); }
+const now = () => Date.now();
 
 function makeId() {
   return crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString("hex");
@@ -173,16 +158,14 @@ function cleanupJobs() {
   const t = now();
   for (const [jobId, job] of jobs) {
     if (t - job.updatedAt > JOB_TTL_MS) {
-      if (job.filePath && fs.existsSync(job.filePath)) {
-        fs.unlink(job.filePath, () => {});
-      }
+      if (job.filePath && fs.existsSync(job.filePath)) fs.unlink(job.filePath, () => {});
       jobs.delete(jobId);
     }
   }
 }
 setInterval(cleanupJobs, 60_000).unref();
 
-// ------------------ Generación Excel (streaming) ------------------
+// -------------------- Excel generation --------------------
 async function generateExcelJob(jobId, filters) {
   const job = jobs.get(jobId);
   if (!job) return;
@@ -190,7 +173,6 @@ async function generateExcelJob(jobId, filters) {
   job.status = "processing";
   job.updatedAt = now();
 
-  // Columnas solicitadas
   const requestedColumns = Array.isArray(filters.columnas) ? filters.columnas : [];
   const finalColumnKeys =
     requestedColumns.length > 0
@@ -206,10 +188,7 @@ async function generateExcelJob(jobId, filters) {
 
   const excelColumns = finalColumnKeys.map((key) => {
     const base = COLUMN_MAP[key];
-    // Estilos por columna (no por celda/fila)
-    if (DATE_COLS.has(key)) {
-      return { ...base, key, style: { numFmt: "yyyy-mm-dd hh:mm" } };
-    }
+    if (DATE_COLS.has(key)) return { ...base, key, style: { numFmt: "yyyy-mm-dd hh:mm" } };
     return { ...base, key };
   });
 
@@ -218,7 +197,6 @@ async function generateExcelJob(jobId, filters) {
   const fileName = `guias_export_${jobId}.xlsx`;
   const filePath = path.join("/tmp", fileName);
 
-  // useSharedStrings=false suele reducir memoria en streaming
   const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
     filename: filePath,
     useStyles: true,
@@ -228,11 +206,9 @@ async function generateExcelJob(jobId, filters) {
   const sheet = workbook.addWorksheet("Guías");
   sheet.columns = excelColumns;
 
-  // Asegura el formato de fecha a nivel columna
+  // Define numFmt por columna (evita costo por celda)
   for (const key of DATE_COLS) {
-    if (finalColumnKeys.includes(key)) {
-      sheet.getColumn(key).numFmt = "yyyy-mm-dd hh:mm";
-    }
+    if (finalColumnKeys.includes(key)) sheet.getColumn(key).numFmt = "yyyy-mm-dd hh:mm";
   }
 
   let total = 0;
@@ -252,10 +228,8 @@ async function generateExcelJob(jobId, filters) {
     if (!data || data.length === 0) break;
 
     for (const row of data) {
-      // Mutación ligera para fechas (sin estilos por celda)
-      for (const k of DATE_COLS) {
-        if (row[k]) row[k] = new Date(row[k]);
-      }
+      // Mutación ligera de fechas
+      for (const k of DATE_COLS) if (row[k]) row[k] = new Date(row[k]);
       sheet.addRow(row).commit();
     }
 
@@ -275,9 +249,9 @@ async function generateExcelJob(jobId, filters) {
   job.updatedAt = now();
 }
 
-// ------------------ Endpoints ------------------
+// -------------------- Endpoints --------------------
 
-// Crea job (rápido, sin timeout)
+// 1) Crear export (responde rápido, sin timeouts)
 app.post("/export", async (req, res) => {
   try {
     if (jobs.size >= MAX_PENDING_JOBS) {
@@ -289,7 +263,7 @@ app.post("/export", async (req, res) => {
 
     jobs.set(jobId, {
       id: jobId,
-      status: "queued",
+      status: "queued", // queued | processing | ready | error
       createdAt: now(),
       updatedAt: now(),
       rows: 0,
@@ -298,7 +272,6 @@ app.post("/export", async (req, res) => {
       fileName: null,
     });
 
-    // Encolar generación (control de concurrencia)
     enqueue(async () => {
       try {
         await generateExcelJob(jobId, filters);
@@ -312,14 +285,12 @@ app.post("/export", async (req, res) => {
       }
     }).catch(() => {});
 
-    // Responder inmediato
     return res.status(202).json({
       ok: true,
       jobId,
       status_url: `/export/status/${jobId}`,
-      // descarga solo cuando esté listo:
       download_url: `/export/download/${jobId}`,
-      note: "El archivo se genera en background. Consulta status_url hasta que esté ready."
+      note: "Generación en background. Consulta status_url hasta que esté ready."
     });
   } catch (err) {
     console.error(err);
@@ -327,7 +298,7 @@ app.post("/export", async (req, res) => {
   }
 });
 
-// Consulta estado/progreso
+// 2) Consultar estado/progreso
 app.get("/export/status/:jobId", (req, res) => {
   const { jobId } = req.params;
   const job = jobs.get(jobId);
@@ -344,7 +315,7 @@ app.get("/export/status/:jobId", (req, res) => {
   });
 });
 
-// Descarga (stream) + borrado opcional tras descargar
+// 3) Descargar (streaming del archivo local)
 app.get("/export/download/:jobId", (req, res) => {
   const { jobId } = req.params;
   const job = jobs.get(jobId);
@@ -360,7 +331,6 @@ app.get("/export/download/:jobId", (req, res) => {
 
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
   res.setHeader("Content-Disposition", `attachment; filename="${job.fileName}"`);
-  // Ayuda a que proxies no intenten “buffer” (no siempre aplica en Render, pero no estorba)
   res.setHeader("X-Accel-Buffering", "no");
 
   const stream = fs.createReadStream(job.filePath);
@@ -371,18 +341,17 @@ app.get("/export/download/:jobId", (req, res) => {
     else res.end();
   });
 
-  // Si quieres borrar tras la primera descarga:
-  // - OJO: si 2 usuarios intentan bajar el mismo job, el 2do podría fallar.
-  // Mejor: borrar por TTL (ya implementado). Aquí NO borramos al finalizar.
+  // No borramos al final para permitir reintentos; se limpia por TTL.
   stream.pipe(res);
 });
 
+// -------------------- Server tuning --------------------
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, () => {
   console.log(`Export service running on port ${PORT}`);
 });
 
-// Evita timeouts del server Node (la plataforma puede tener límites propios, pero esto ayuda)
-server.requestTimeout = 0;     // Node 18+
+// Evita timeouts del server Node (la plataforma puede imponer límites)
+server.requestTimeout = 0;
 server.headersTimeout = 0;
 server.keepAliveTimeout = 65_000;
