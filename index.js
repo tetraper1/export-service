@@ -119,7 +119,7 @@ const MAX_ROWS = 70000;
 app.post("/export/test", async (req, res) => {
   try {
     const filters = req.body;
-    const PAGE_SIZE = 4000;
+    const PAGE_SIZE = 5000;
     let lastId = null;
     let total = 0;
 
