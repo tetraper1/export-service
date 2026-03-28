@@ -10,7 +10,7 @@ app.use(express.json());
 
 // -------------------- Config (Starter-friendly) --------------------
 const MAX_ROWS = 45_000;
-const PAGE_SIZE = 2_00;
+const PAGE_SIZE = 1_00;
 const MAX_CONCURRENT_EXPORTS = Number(process.env.MAX_CONCURRENT_EXPORTS || 1);
 
 // TTL del job (memoria/registro). Recomendado > TTL del archivo.
