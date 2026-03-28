@@ -91,7 +91,7 @@ const DATE_COLS = new Set([
   "fecha_ultima_actualizacion",
 ]);
 
-// -------------------- Query builder (keyset pagination) --------------------
+// -------------------- Query builder --------------------
 const buildQuery = (filters, selectColumns) => {
   let query = supabase
     .from("vw_guias_report")
@@ -164,14 +164,10 @@ function makeId() {
   return crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString("hex");
 }
 
-// Limpieza:
-// - Expira ARCHIVO por FILE_TTL_MS (libera disco) y marca job como "expired"
-// - Limpia JOB por JOB_TTL_MS (libera memoria)
 function cleanupJobs() {
   const t = now();
 
   for (const [jobId, job] of jobs) {
-    // 1) Expirar archivo para liberar espacio
     if (job.status === "ready" && job.fileCreatedAt) {
       if (t - job.fileCreatedAt > FILE_TTL_MS) {
         if (job.filePath && fs.existsSync(job.filePath)) {
@@ -179,13 +175,12 @@ function cleanupJobs() {
         }
         job.filePath = null;
         job.fileName = null;
-        job.status = "expired"; // indicar que no hay archivo ya
+        job.status = "expired";
         job.updatedAt = now();
         continue;
       }
     }
 
-    // Limpiar jobs viejos (memoria)
     if (t - job.updatedAt > JOB_TTL_MS) {
       if (job.filePath && fs.existsSync(job.filePath)) {
         fs.unlink(job.filePath, () => {});
@@ -243,16 +238,22 @@ async function generateExcelJob(jobId, filters) {
   }
 
   let total = 0;
+  let lastCreatedAt = null;
   let lastId = null;
 
   while (total < MAX_ROWS) {
     const remaining = MAX_ROWS - total;
 
     let query = buildQuery(filters, selectColumns)
+      .order("fecha_de_creacion", { ascending: true })
       .order("id", { ascending: true })
       .limit(Math.min(PAGE_SIZE, remaining));
 
-    if (lastId) query = query.gt("id", lastId);
+    if (lastCreatedAt !== null && lastId !== null) {
+      query = query.or(
+        `fecha_de_creacion.gt.${lastCreatedAt},and(fecha_de_creacion.eq.${lastCreatedAt},id.gt.${lastId})`
+      );
+    }
 
     const { data, error } = await query;
     if (error) throw error;
@@ -263,7 +264,9 @@ async function generateExcelJob(jobId, filters) {
       sheet.addRow(row).commit();
     }
 
-    lastId = data[data.length - 1].id;
+    const lastRow = data[data.length - 1];
+    lastCreatedAt = lastRow.fecha_de_creacion;
+    lastId = lastRow.id;
     total += data.length;
 
     job.rows = total;
@@ -276,7 +279,7 @@ async function generateExcelJob(jobId, filters) {
   job.rows = total;
   job.filePath = filePath;
   job.fileName = fileName;
-  job.fileCreatedAt = now(); // desde aquí corre FILE_TTL_MS
+  job.fileCreatedAt = now();
   job.updatedAt = now();
 }
 
@@ -285,12 +288,10 @@ async function generateExcelJob(jobId, filters) {
 // 1) Crear export
 app.post("/export", async (req, res) => {
   try {
-    // Protección por jobs
     if (jobs.size >= MAX_PENDING_JOBS) {
       return res.status(429).json({ error: "Demasiados exports en cola. Intenta más tarde." });
     }
 
-    // Protección por archivos listos en disco (anti-saturación)
     const readyCount = [...jobs.values()].filter((j) => j.status === "ready").length;
     if (readyCount >= MAX_READY_FILES) {
       return res.status(429).json({ error: "Hay demasiados archivos listos para descargar. Intenta más tarde." });
@@ -301,7 +302,7 @@ app.post("/export", async (req, res) => {
 
     jobs.set(jobId, {
       id: jobId,
-      status: "queued", // queued | processing | ready | expired | error
+      status: "queued",
       createdAt: now(),
       updatedAt: now(),
       rows: 0,
