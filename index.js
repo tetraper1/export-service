@@ -19,11 +19,24 @@ const JOB_TTL_MS = Number(process.env.JOB_TTL_MS || 60 * 60 * 1000); // 60 min
 // TTL del ARCHIVO: para no saturar espacio
 const FILE_TTL_MS = Number(process.env.FILE_TTL_MS || 5 * 60 * 1000); // 5 min
 
-// Protección anti-saturación: límite de archivos "ready" en disco simultáneamente
+// Límite de archivos en disco (queued + processing + ready)
 const MAX_READY_FILES = Number(process.env.MAX_READY_FILES || 20);
 
-// Límite de jobs (en memoria)
+// Límite de jobs pendientes (queued + processing)
 const MAX_PENDING_JOBS = Number(process.env.MAX_PENDING_JOBS || 200);
+
+
+const EXPORT_API_KEY = process.env.EXPORT_API_KEY || null;
+
+function requireApiKey(req, res, next) {
+  if (!EXPORT_API_KEY) return next();
+  const header = req.get("authorization") || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+  const a = Buffer.from(token);
+  const b = Buffer.from(EXPORT_API_KEY);
+  if (a.length === b.length && crypto.timingSafeEqual(a, b)) return next();
+  return res.status(401).json({ error: "No autorizado" });
+}
 
 // -------------------- Supabase --------------------
 const supabase = createClient(
@@ -91,7 +104,8 @@ const DATE_COLS = new Set([
   "fecha_ultima_actualizacion",
 ]);
 
-// -------------------- Query builder (keyset pagination) --------------------
+// -------------------- Query builder --------------------
+// Filtros (sin orden ni paginación).
 const buildQuery = (filters, selectColumns) => {
   let query = supabase
     .from("vw_guias_report")
@@ -124,6 +138,30 @@ const buildQuery = (filters, selectColumns) => {
 
   return query;
 };
+
+// Una página, ordenada por (fecha_de_creacion, id) con cursor compuesto.
+// El .gte redundante le da al planner un rango de índice sobre created_at;
+// sin él, el .or() por sí solo no se traduce a un rango de índice.
+async function fetchPage({ filters, selectColumns, cursor, limit }) {
+  let query = buildQuery(filters, selectColumns);
+
+  if (cursor) {
+    query = query
+      .gte("fecha_de_creacion", cursor.fecha)
+      .or(
+        `fecha_de_creacion.gt.${cursor.fecha},and(fecha_de_creacion.eq.${cursor.fecha},id.gt.${cursor.id})`
+      );
+  }
+
+  query = query
+    .order("fecha_de_creacion", { ascending: true })
+    .order("id", { ascending: true })
+    .limit(limit);
+
+  const { data, error } = await query;
+  if (error) throw error;
+  return data || [];
+}
 
 // -------------------- Simple queue (no deps) --------------------
 let activeExports = 0;
@@ -179,13 +217,13 @@ function cleanupJobs() {
         }
         job.filePath = null;
         job.fileName = null;
-        job.status = "expired"; // indicar que no hay archivo ya
+        job.status = "expired";
         job.updatedAt = now();
         continue;
       }
     }
 
-    // Limpiar jobs viejos (memoria)
+    // 2) Limpiar jobs viejos (memoria)
     if (t - job.updatedAt > JOB_TTL_MS) {
       if (job.filePath && fs.existsSync(job.filePath)) {
         fs.unlink(job.filePath, () => {});
@@ -198,6 +236,17 @@ function cleanupJobs() {
 setInterval(cleanupJobs, 60_000).unref();
 
 // -------------------- Excel generation --------------------
+
+// Si el job falla a mitad, cierra el workbook (best-effort) y borra el archivo parcial.
+async function discardPartial(workbook, filePath) {
+  try {
+    if (workbook) await workbook.commit();
+  } catch {
+    // ignorar: ya estamos en un camino de error
+  }
+  fs.unlink(filePath, () => {});
+}
+
 async function generateExcelJob(jobId, filters) {
   const job = jobs.get(jobId);
   if (!job) return;
@@ -205,10 +254,11 @@ async function generateExcelJob(jobId, filters) {
   job.status = "processing";
   job.updatedAt = now();
 
+  // Respeta el orden pedido por el usuario (antes se ordenaba alfabéticamente).
   const requestedColumns = Array.isArray(filters.columnas) ? filters.columnas : [];
   const finalColumnKeys =
     requestedColumns.length > 0
-      ? requestedColumns.filter((col) => COLUMN_MAP[col]).sort((a, b) => a.localeCompare(b))
+      ? [...new Set(requestedColumns.filter((col) => COLUMN_MAP[col]))]
       : COLUMNS.map((c) => c.key);
 
   if (finalColumnKeys.length === 0) {
@@ -224,76 +274,104 @@ async function generateExcelJob(jobId, filters) {
     return { ...base, key };
   });
 
-  const selectColumns = ["id", ...finalColumnKeys];
+  // id y fecha_de_creacion SIEMPRE se piden: son el cursor de paginación.
+  // Solo se escriben al Excel las columnas de finalColumnKeys.
+  const selectColumns = [...new Set(["id", "fecha_de_creacion", ...finalColumnKeys])];
 
   const fileName = `guias_export_${jobId}.xlsx`;
   const filePath = path.join("/tmp", fileName);
 
-  const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
-    filename: filePath,
-    useStyles: true,
-    useSharedStrings: false,
-  });
+  let workbook = null;
 
-  const sheet = workbook.addWorksheet("Guías");
-  sheet.columns = excelColumns;
+  try {
+    workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
+      filename: filePath,
+      useStyles: true,
+      useSharedStrings: false,
+    });
 
-  for (const key of DATE_COLS) {
-    if (finalColumnKeys.includes(key)) sheet.getColumn(key).numFmt = "yyyy-mm-dd hh:mm";
-  }
+    const sheet = workbook.addWorksheet("Guías");
+    sheet.columns = excelColumns;
 
-  let total = 0;
-  let lastId = null;
-
-  while (total < MAX_ROWS) {
-    const remaining = MAX_ROWS - total;
-
-    let query = buildQuery(filters, selectColumns)
-      .order("id", { ascending: true })
-      .limit(Math.min(PAGE_SIZE, remaining));
-
-    if (lastId) query = query.gt("id", lastId);
-
-    const { data, error } = await query;
-    if (error) throw error;
-    if (!data || data.length === 0) break;
-
-    for (const row of data) {
-      for (const k of DATE_COLS) if (row[k]) row[k] = new Date(row[k]);
-      sheet.addRow(row).commit();
+    for (const key of DATE_COLS) {
+      if (finalColumnKeys.includes(key)) sheet.getColumn(key).numFmt = "yyyy-mm-dd hh:mm";
     }
 
-    lastId = data[data.length - 1].id;
-    total += data.length;
+    let total = 0;
+    let cursor = null; // { fecha, id } con el string ORIGINAL de fecha (no Date)
+    let truncated = false;
 
+    while (total < MAX_ROWS) {
+      const limit = Math.min(PAGE_SIZE, MAX_ROWS - total);
+      const rows = await fetchPage({ filters, selectColumns, cursor, limit });
+      if (rows.length === 0) break;
+
+      // Cursor ANTES de convertir fechas: Date trunca microsegundos y rompería el cursor.
+      const last = rows[rows.length - 1];
+      if (last.fecha_de_creacion == null || last.id == null) {
+        throw new Error("La fila no trae fecha_de_creacion/id: no se puede paginar");
+      }
+      cursor = { fecha: last.fecha_de_creacion, id: last.id };
+
+      for (const row of rows) {
+        const out = {};
+        for (const k of finalColumnKeys) {
+          const v = row[k];
+          out[k] = DATE_COLS.has(k) && v ? new Date(v) : v;
+        }
+        sheet.addRow(out).commit();
+      }
+
+      total += rows.length;
+      job.rows = total;
+      job.updatedAt = now();
+
+      if (rows.length < limit) break; // última página, no hace falta otra consulta
+    }
+
+    // Si llegamos al tope, verifica con 1 fila si realmente había más datos.
+    if (total >= MAX_ROWS && cursor) {
+      const probe = await fetchPage({ filters, selectColumns, cursor, limit: 1 });
+      truncated = probe.length > 0;
+    }
+
+    await workbook.commit();
+
+    job.status = "ready";
     job.rows = total;
+    job.truncated = truncated;
+    job.filePath = filePath;
+    job.fileName = fileName;
+    job.fileCreatedAt = now(); // desde aquí corre FILE_TTL_MS
     job.updatedAt = now();
+  } catch (err) {
+    await discardPartial(workbook, filePath);
+    throw err;
   }
-
-  await workbook.commit();
-
-  job.status = "ready";
-  job.rows = total;
-  job.filePath = filePath;
-  job.fileName = fileName;
-  job.fileCreatedAt = now(); // desde aquí corre FILE_TTL_MS
-  job.updatedAt = now();
 }
 
 // -------------------- Endpoints --------------------
 
 // 1) Crear export
-app.post("/export", async (req, res) => {
+app.post("/export", requireApiKey, async (req, res) => {
   try {
-    // Protección por jobs
-    if (jobs.size >= MAX_PENDING_JOBS) {
+    let pending = 0;
+    let filesOnDiskOrComing = 0;
+    for (const j of jobs.values()) {
+      if (j.status === "queued" || j.status === "processing") pending++;
+      if (j.status === "queued" || j.status === "processing" || j.status === "ready") {
+        filesOnDiskOrComing++;
+      }
+    }
+
+    // Protección por jobs pendientes
+    if (pending >= MAX_PENDING_JOBS) {
       return res.status(429).json({ error: "Demasiados exports en cola. Intenta más tarde." });
     }
 
-    // Protección por archivos listos en disco (anti-saturación)
-    const readyCount = [...jobs.values()].filter((j) => j.status === "ready").length;
-    if (readyCount >= MAX_READY_FILES) {
-      return res.status(429).json({ error: "Hay demasiados archivos listos para descargar. Intenta más tarde." });
+    // Protección anti-saturación de disco
+    if (filesOnDiskOrComing >= MAX_READY_FILES) {
+      return res.status(429).json({ error: "Hay demasiados archivos listos o en proceso. Intenta más tarde." });
     }
 
     const filters = req.body || {};
@@ -305,6 +383,7 @@ app.post("/export", async (req, res) => {
       createdAt: now(),
       updatedAt: now(),
       rows: 0,
+      truncated: false,
       error: null,
       filePath: null,
       fileName: null,
@@ -315,10 +394,11 @@ app.post("/export", async (req, res) => {
       try {
         await generateExcelJob(jobId, filters);
       } catch (err) {
+        console.error("export job failed", jobId, err);
         const job = jobs.get(jobId);
         if (job) {
           job.status = "error";
-          job.error = err?.message || "Error generando excel";
+          job.error = err?.message || String(err) || "Error generando excel";
           job.updatedAt = now();
         }
       }
@@ -338,7 +418,7 @@ app.post("/export", async (req, res) => {
 });
 
 // 2) Consultar estado/progreso
-app.get("/export/status/:jobId", (req, res) => {
+app.get("/export/status/:jobId", requireApiKey, (req, res) => {
   const { jobId } = req.params;
   const job = jobs.get(jobId);
   if (!job) return res.status(404).json({ error: "Job no encontrado" });
@@ -347,6 +427,8 @@ app.get("/export/status/:jobId", (req, res) => {
     id: job.id,
     status: job.status,
     rows: job.rows,
+    truncated: job.truncated, // true si había más de MAX_ROWS filas y se cortó
+    max_rows: MAX_ROWS,
     error: job.error,
     ready: job.status === "ready",
     download_url: job.status === "ready" ? `/export/download/${jobId}` : null,
@@ -378,6 +460,9 @@ app.get("/export/download/:jobId", (req, res) => {
   res.setHeader("X-Accel-Buffering", "no");
 
   const stream = fs.createReadStream(job.filePath);
+
+  // Si el cliente cancela la descarga, libera el file descriptor.
+  res.on("close", () => stream.destroy());
 
   stream.on("error", (e) => {
     console.error("read stream error", e);
